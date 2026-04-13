@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Data (LFW archive lives locally; do not commit)
+data/
+
+# Model checkpoints / large binaries
+*.pt
+*.ckpt
+*.pth
+*.onnx
+
+# Future-milestone outputs
+cloaked/
+outputs/
+runs/
+logs/
+
+# splits/ is intentionally NOT ignored — partition manifests are versioned
