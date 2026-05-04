@@ -85,18 +85,21 @@ def _build_purifications(
 def _scores_to_dataframe(scores) -> pd.DataFrame:
     rows = []
     for s in scores:
-        row = {
+        rows.append({
             "method": s.method,
             "n": s.n_images,
             "rank1": round(s.rank1, 3),
             "mean_true_cos": round(s.mean_true_cos, 3),
             "qa_gap": round(s.qa_gap, 3),
             "null_gap": round(s.null_gap, 3),
-            "ssim": "—" if s.ssim != s.ssim else round(s.ssim, 3),  # NaN check
-            "psnr": "—" if s.psnr != s.psnr else round(s.psnr, 2),
-        }
-        rows.append(row)
-    return pd.DataFrame(rows)
+            "ssim": float(s.ssim),  # NaN renders as blank; keep numeric for Arrow
+            "psnr": float(s.psnr),
+        })
+    df = pd.DataFrame(rows)
+    # Force numeric dtypes so Arrow serialization is unambiguous.
+    for col in ("rank1", "mean_true_cos", "qa_gap", "null_gap", "ssim", "psnr"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 
 def _purif_to_dataframe(scores) -> pd.DataFrame:
@@ -272,11 +275,11 @@ with tab_score:
     if "last_scores" in st.session_state:
         scores = st.session_state.last_scores
         st.markdown("#### Identity surfaces + visual quality")
-        st.dataframe(_scores_to_dataframe(scores), hide_index=True, use_container_width=True)
+        st.dataframe(_scores_to_dataframe(scores), hide_index=True, width="stretch")
         purif_df = _purif_to_dataframe(scores)
         if not purif_df.empty:
             st.markdown("#### Robustness — `rank1 / mean_true_cos` under purification")
-            st.dataframe(purif_df, hide_index=True, use_container_width=True)
+            st.dataframe(purif_df, hide_index=True, width="stretch")
 
     if save and "last_scores" in st.session_state:
         out = PROJECT_ROOT / "outputs" / "eval_dashboard_report.json"
@@ -315,18 +318,18 @@ with tab_drill:
             subset = per_img[per_img["identity"] == sel_id].reset_index(drop=True)
             st.dataframe(
                 subset[["filename", "cos_true", "cos_null", "max_cos_other", "qa_gap"]],
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
             row = subset.iloc[0]
             cols = st.columns(2 + (1 if purifs else 0))
             with Image.open(row["original_path"]) as orig:
-                cols[0].image(orig, caption=f"original\n{row['filename']}", use_container_width=True)
+                cols[0].image(orig, caption=f"original\n{row['filename']}", width="stretch")
             with Image.open(row["candidate_path"]) as cand:
                 cand = cand.convert("RGB").copy()
                 cols[1].image(
                     cand,
                     caption=f"{sel_method.name}\ncos_true={row['cos_true']}  cos_null={row['cos_null']}",
-                    use_container_width=True,
+                    width="stretch",
                 )
                 if purifs:
                     pname, pfn = next(iter(purifs.items()))
@@ -338,7 +341,7 @@ with tab_drill:
                     cols[2].image(
                         purified,
                         caption=f"{pname}\ncos_true={cos_true_p:.3f}",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
 # ----- Tab 3: Compare -------------------------------------------------------
@@ -359,14 +362,17 @@ with tab_compare:
         for field in ("rank1", "mean_true_cos", "qa_gap", "null_gap", "ssim", "psnr"):
             va = getattr(sa, field)
             vb = getattr(sb, field)
-            delta = (vb - va) if (va == va and vb == vb) else float("nan")  # NaN-safe
+            delta = (vb - va) if (va == va and vb == vb) else float("nan")
             rows.append({
                 "metric": field,
-                a: round(va, 3) if va == va else "—",
-                b: round(vb, 3) if vb == vb else "—",
-                "Δ (B−A)": round(delta, 3) if delta == delta else "—",
+                a: float(va),
+                b: float(vb),
+                "delta_b_minus_a": float(delta),
             })
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        cmp_df = pd.DataFrame(rows)
+        for col in (a, b, "delta_b_minus_a"):
+            cmp_df[col] = pd.to_numeric(cmp_df[col], errors="coerce")
+        st.dataframe(cmp_df, hide_index=True, width="stretch")
 
         # Robustness diff
         purif_names = sorted(set(sa.purifications) | set(sb.purifications))
@@ -376,11 +382,14 @@ with tab_compare:
             for pn in purif_names:
                 pa = sa.purifications.get(pn, {}).get("rank1")
                 pb = sb.purifications.get(pn, {}).get("rank1")
-                d = (pb - pa) if (pa is not None and pb is not None) else None
+                d = (pb - pa) if (pa is not None and pb is not None) else float("nan")
                 rrows.append({
                     "purification": pn,
-                    a: f"{pa:.3f}" if pa is not None else "—",
-                    b: f"{pb:.3f}" if pb is not None else "—",
-                    "Δ": f"{d:+.3f}" if d is not None else "—",
+                    a: float(pa) if pa is not None else float("nan"),
+                    b: float(pb) if pb is not None else float("nan"),
+                    "delta": float(d),
                 })
-            st.dataframe(pd.DataFrame(rrows), hide_index=True, use_container_width=True)
+            rdf = pd.DataFrame(rrows)
+            for col in (a, b, "delta"):
+                rdf[col] = pd.to_numeric(rdf[col], errors="coerce")
+            st.dataframe(rdf, hide_index=True, width="stretch")
