@@ -7,3 +7,4 @@ opencv-python>=4.9
 pandas>=2.1
 tqdm>=4.66
 scikit-image>=0.22
+gradio>=4.44

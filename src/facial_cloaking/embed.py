@@ -55,8 +55,10 @@ def _read_csv_identity(csv_path: Path)-> dict[str, list[Path]] :
         for row in csv.DictReader(f) :
             identity = row["identity"].strip()
             img_path = PROJECT_ROOT / row["image_path"].strip()
-            
-            groups.setdefault(identity, [].append(img_path))
+
+            if identity not in groups:
+                groups[identity] = []
+            groups[identity].append(img_path)
     
     return groups
     
