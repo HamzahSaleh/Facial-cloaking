@@ -25,24 +25,35 @@ def encode_image(model: torch.nn.Module, preprocess, img, device: str) -> torch.
     return torch.nn.functional.normalize(features, dim=-1).squeeze(0)
 
 def _encode_paths(
-    model: torch.nn.Module, preprocess, 
-    paths: list[Path], device : str, 
+    model: torch.nn.Module, preprocess,
+    paths: list[Path], device : str,
     batch_size: int = 32
     )->torch.Tensor :
 
-    all_embeddings : list[torch.Tensor] = []
+    images = [load_image(p) for p in paths]
+    return encode_pil_images(model, preprocess, images, device, batch_size=batch_size)
 
-    for start in range(0, len(paths), batch_size) :
-        chunk = paths[start : start + batch_size]
 
-        tensors = [preprocess(load_image(p))for p in chunk]
+def encode_pil_images(
+    model: torch.nn.Module, preprocess,
+    images: list,
+    device: str,
+    batch_size: int = 32,
+) -> torch.Tensor:
+    """Encode a list of PIL images to L2-normalized CLIP embeddings."""
+    all_embeddings: list[torch.Tensor] = []
+
+    for start in range(0, len(images), batch_size):
+        chunk = images[start : start + batch_size]
+
+        tensors = [preprocess(img) for img in chunk]
         batch = torch.stack(tensors).to(device)
 
-        with torch.no_grad() :
+        with torch.no_grad():
             features = model.encode_image(batch)
-        
+
         all_embeddings.append(torch.nn.functional.normalize(features, dim=-1))
-    
+
     return torch.cat(all_embeddings, dim=0)
 
 def _read_csv_identity(csv_path: Path)-> dict[str, list[Path]] :
@@ -56,17 +67,15 @@ def _read_csv_identity(csv_path: Path)-> dict[str, list[Path]] :
             identity = row["identity"].strip()
             img_path = PROJECT_ROOT / row["image_path"].strip()
 
-            if identity not in groups:
-                groups[identity] = []
-            groups[identity].append(img_path)
-    
+            groups.setdefault(identity, []).append(img_path)
+
     return groups
     
 def compute_identity_embeddings(model: torch.nn.Module, preprocess, csv_path: Path |str, device: str)->dict[str, torch.Tensor] :
     
     groups = _read_csv_identity(csv_path)
 
-    identity_embeddings = dict[str, torch.Tensor] = {}
+    identity_embeddings: dict[str, torch.Tensor] = {}
 
     for identity, paths in groups.items() :
         embeddings = _encode_paths(model, preprocess, paths, device)

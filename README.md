@@ -74,103 +74,139 @@ Built from LFW identities with at least 6 images. For each of 100 identities:
 See [splits/split_manifest.json](splits/split_manifest.json) for the exact
 configuration used.
 
-## Pipeline
+## Evaluation pipeline
 
-The full experiment pipeline (scripts marked *planned* are specified in
-[plan.md](plan.md) but not yet implemented):
+The evaluation pipeline lives in [src/facial_cloaking/eval_pipeline.py](src/facial_cloaking/eval_pipeline.py)
+and is driven by three scripts under `scripts/`. It is **method-agnostic**:
+each cloaking algorithm just has to drop its outputs into a flat directory
+whose filenames match the `filename` column of `splits/protected.csv`.
 
-```
-build_splits.py            -> splits/*.csv
-compute_attractors.py  *   -> outputs/attractors.pt          (null + per-identity embeddings)
-run_cloaking.py        *   -> outputs/cloaked/*.png          (+ cloaking_report.json)
-evaluate.py            *   -> retrieval / Q&A / editing metrics
-robustness_test.py     *   -> retrieval after JPEG / blur / filtering purification
-```
+### 1. Precompute the identity gallery (once)
 
-Typical usage (once implemented):
+The gallery is the per-identity CLIP centroid plus the null attractor.
+It only has to be built once and is cached on disk.
 
 ```bash
-python scripts/compute_attractors.py
-python scripts/run_cloaking.py --epsilon 8 --steps 300 --lr 0.01
-python scripts/evaluate.py
-python scripts/robustness_test.py
+python scripts/compute_attractors.py \
+    --csv splits/clean_test.csv \
+    --output outputs/attractors.pt
 ```
 
-## Package modules
+### 2. Produce method outputs
 
-- [src/facial_cloaking/paths.py](src/facial_cloaking/paths.py) — canonical
-  project paths (`PROJECT_ROOT`, `LFW_ROOT`, `SPLITS_DIR`).
-- [src/facial_cloaking/data.py](src/facial_cloaking/data.py) — identity
-  enumeration, per-identity image listing, PIL image loading.
-- [src/facial_cloaking/embed.py](src/facial_cloaking/embed.py) — CLIP
-  ViT-B/32 wrapper: `load_clip_model`, `encode_image`,
-  `compute_identity_embeddings`, `compute_null_attractor`.
+A "method" is a folder of cloaked images named exactly like the
+`filename` column of the CSV split being scored. For local
+sanity-checking before any cloaking algorithm is wired up, the repo
+ships two reference baselines:
 
-Planned (see [plan.md](plan.md)): `dct_utils.py` (differentiable blockwise DCT
-+ mid-frequency mask) and `cloak.py` (per-image optimization loop,
-`CloakConfig`, `cloak_image`, `cloak_batch`).
+```bash
+python scripts/make_baselines.py
+# writes outputs/methods/noise/*.jpg  and  outputs/methods/blur/*.jpg
+```
 
-## Evaluation surfaces
+### 3. Score methods on the three identity surfaces + visual quality
 
-1. **Identity retrieval.** Cosine similarity of cloaked embeddings against all
-   100 identity centroids. Report Rank-1 accuracy and mean cosine similarity
-   to the true identity.
-2. **Identity Q&A resistance.** Gap between cosine similarity to the true
-   identity and the max cosine similarity to any other identity.
-3. **Editing resistance.** Cosine similarity between an edited output and the
-   original uncloaked identity, via an external editing pipeline.
-4. **Visual quality.** SSIM and PSNR between cloaked and original.
+```bash
+python scripts/evaluate.py \
+    --methods uncloaked \
+              noise=outputs/methods/noise \
+              blur=outputs/methods/blur \
+    --csv splits/protected.csv \
+    --attractors outputs/attractors.pt \
+    --output outputs/eval_report.json
+```
 
-A cloak is considered irreversible if retrieval accuracy stays near 0% after
-JPEG compression, Gaussian blur, bilateral filtering, and bit-depth reduction
-(see `robustness_test.py`).
+Add purifications inline to also report retrieval after each attack:
 
-## Industry-aligned default profile
+```bash
+python scripts/evaluate.py \
+    --methods uncloaked noise=outputs/methods/noise \
+    --purify jpeg-75 blur-1.0 bits-4 bilateral
+```
 
-Use this as the project default unless an experiment explicitly states a
-different configuration.
+`uncloaked` is a special method name that uses the original images and
+gives the upper-bound retrieval reference. The script prints a Markdown
+table and writes a JSON report.
 
-### Frequency and transform
+### 4. Standard robustness grid
 
-- Block transform: 8x8 DCT (JPEG-compatible)
-- Coefficient order: JPEG zig-zag order
-- Target band for frequency entanglement: indices 3-12 (mid-frequency)
+Run the full purification grid from `plan.md` (JPEG 95/75/50, Gaussian
+blur σ=1.0/2.0, bilateral, bit-depth 6/4) in one shot:
 
-### Color handling
+```bash
+python scripts/robustness_test.py \
+    --methods uncloaked noise=outputs/methods/noise blur=outputs/methods/blur \
+    --output outputs/robustness_report.json
+```
 
-- Working color split for frequency weighting: YCbCr
-- Matrix convention: ITU-R BT.601
-- Weighting policy: prioritize Y (luminance), weaker Cb/Cr weighting
+### 5. LLM / image-edit alterations (consistent across methods)
 
-### Perturbation budgets
+To compare cloaks on *editing resistance* every method must be altered
+under the **same** edit procedure — same provider, same prompt, same
+seed — otherwise score differences reflect LLM run-to-run variance
+instead of cloak strength.
 
-- Primary run: epsilon = 8/255
-- Required ablations: epsilon in {4/255, 16/255}
+[scripts/run_edits.py](scripts/run_edits.py) enforces this. It reads
+`splits/editing_eval.csv`, applies the chosen edit provider to every
+row of the chosen source folder (or the uncloaked originals), and
+writes a drop-in method folder with the same filename layout. A
+`_edit_run.json` manifest is saved alongside each output folder
+recording the provider, params, prompt, seed, source, and CSV used.
 
-### Quality and identity metrics
+The default provider, `local_stub`, is fully deterministic and offline:
+given the same `(image, prompt, seed, filename)` it produces
+byte-identical output on every run, on every machine. This guarantees
+the LLM-alteration column of the eval report is reproducible even
+without API access. To plug a real LLM-backed editor in, implement the
+`EditProvider` protocol in
+[src/facial_cloaking/edits.py](src/facial_cloaking/edits.py) and add it
+to the `_PROVIDERS` registry.
 
-- Visual quality: SSIM and PSNR
-- Perceptual quality (recommended): LPIPS
-- Identity metrics: Rank-1 retrieval and mean cosine to true identity
+Recommended workflow:
 
-### Robustness stress tests
+```bash
+# Edit the uncloaked baseline (what the LLM does to a clean portrait).
+python scripts/run_edits.py \
+    --source uncloaked \
+    --out outputs/edits/uncloaked \
+    --csv splits/editing_eval.csv \
+    --seed 0
 
-- JPEG recompression at quality 95, 75, and 50
-- Gaussian blur (sigma 1.0 and 2.0)
-- Bilateral filter
-- Bit-depth reduction (6-bit and 4-bit)
+# Edit each cloaking method's outputs with the SAME provider/prompt/seed.
+python scripts/run_edits.py \
+    --source outputs/methods/noise \
+    --out outputs/edits/noise \
+    --csv splits/editing_eval.csv \
+    --seed 0
 
-### Reporting standard
+python scripts/run_edits.py \
+    --source outputs/methods/blur \
+    --out outputs/edits/blur \
+    --csv splits/editing_eval.csv \
+    --seed 0
 
-- Fix random seeds and report them
-- Report exact preprocessing and color-space transform used
-- Report means and standard deviations across identities/images
-- Report uncloaked baseline and cloaked deltas side-by-side
+# Score the edited folders with the same gallery + metrics.
+python scripts/evaluate.py \
+    --methods uncloaked_edited=outputs/edits/uncloaked \
+              noise_edited=outputs/edits/noise \
+              blur_edited=outputs/edits/blur \
+    --csv splits/editing_eval.csv \
+    --output outputs/edit_eval_report.json
+```
 
-## Status
+A cloak is considered to resist editing if its `*_edited` row has a
+**lower** rank-1 and lower mean-true-cosine than `uncloaked_edited`
+under the same provider/prompt/seed.
 
-- [x] Environment, data splits, CLIP embedding utilities
-- [ ] Null attractor + per-identity embedding precomputation script
-- [ ] Differentiable DCT utilities
-- [ ] Cloaking optimization loop
-- [ ] Evaluation and robustness scripts
+### Output layout
+
+```
+outputs/
+  attractors.pt                # gallery (centroids + null attractor)
+  methods/<name>/*.jpg         # cloaked images per method
+  edits/<name>/*.jpg           # LLM-altered images per method
+  edits/<name>/_edit_run.json  # provider/prompt/seed manifest
+  eval_report.json             # scripts/evaluate.py output
+  robustness_report.json       # scripts/robustness_test.py output
+  edit_eval_report.json        # eval over edited methods
+```
