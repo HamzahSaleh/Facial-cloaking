@@ -76,137 +76,77 @@ configuration used.
 
 ## Evaluation pipeline
 
-The evaluation pipeline lives in [src/facial_cloaking/eval_pipeline.py](src/facial_cloaking/eval_pipeline.py)
-and is driven by three scripts under `scripts/`. It is **method-agnostic**:
-each cloaking algorithm just has to drop its outputs into a flat directory
-whose filenames match the `filename` column of `splits/protected.csv`.
+Score any number of cloaking methods on three surfaces (identity retrieval,
+Q&A gap, null-attractor gap) plus visual quality (SSIM / PSNR), and replay the
+same scoring under purification attacks (JPEG, Gaussian blur, bilateral,
+bit-depth reduction).
 
-### 1. Precompute the identity gallery (once)
+A "method" is just a folder of cloaked images named identically to the
+`filename` column of `splits/protected.csv`. The literal name `uncloaked`
+uses the original images and is the upper-bound retrieval reference.
 
-The gallery is the per-identity CLIP centroid plus the null attractor.
-It only has to be built once and is cached on disk.
-
-```bash
-python scripts/compute_attractors.py \
-    --csv splits/clean_test.csv \
-    --output outputs/attractors.pt
-```
-
-### 2. Produce method outputs
-
-A "method" is a folder of cloaked images named exactly like the
-`filename` column of the CSV split being scored. For local
-sanity-checking before any cloaking algorithm is wired up, the repo
-ships two reference baselines:
+### One-time setup
 
 ```bash
+# Encode the clean_test split into a 100-identity gallery + null attractor.
+python scripts/compute_attractors.py
+# -> outputs/attractors.pt
+
+# (Optional) generate two reference methods so the pipeline is runnable
+# before any real cloak exists.
 python scripts/make_baselines.py
-# writes outputs/methods/noise/*.jpg  and  outputs/methods/blur/*.jpg
+# -> outputs/methods/noise/   outputs/methods/blur/
 ```
 
-### 3. Score methods on the three identity surfaces + visual quality
+### Score from the CLI
 
 ```bash
+# Compare uncloaked vs. the two reference methods, with a couple of attacks.
 python scripts/evaluate.py \
-    --methods uncloaked \
-              noise=outputs/methods/noise \
-              blur=outputs/methods/blur \
-    --csv splits/protected.csv \
-    --attractors outputs/attractors.pt \
-    --output outputs/eval_report.json
-```
-
-Add purifications inline to also report retrieval after each attack:
-
-```bash
-python scripts/evaluate.py \
-    --methods uncloaked noise=outputs/methods/noise \
-    --purify jpeg-75 blur-1.0 bits-4 bilateral
-```
-
-`uncloaked` is a special method name that uses the original images and
-gives the upper-bound retrieval reference. The script prints a Markdown
-table and writes a JSON report.
-
-### 4. Standard robustness grid
-
-Run the full purification grid from `plan.md` (JPEG 95/75/50, Gaussian
-blur σ=1.0/2.0, bilateral, bit-depth 6/4) in one shot:
-
-```bash
-python scripts/robustness_test.py \
     --methods uncloaked noise=outputs/methods/noise blur=outputs/methods/blur \
-    --output outputs/robustness_report.json
+    --purify jpeg-75 blur-1.0 bits-4
+# Writes a markdown table to stdout and outputs/eval_report.json.
+
+# Same scoring, but with the full standard purification grid.
+python scripts/robustness_test.py \
+    --methods uncloaked noise=outputs/methods/noise
 ```
 
-### 5. LLM / image-edit alterations (consistent across methods)
+## Streamlit dashboard
 
-To compare cloaks on *editing resistance* every method must be altered
-under the **same** edit procedure — same provider, same prompt, same
-seed — otherwise score differences reflect LLM run-to-run variance
-instead of cloak strength.
-
-[scripts/run_edits.py](scripts/run_edits.py) enforces this. It reads
-`splits/editing_eval.csv`, applies the chosen edit provider to every
-row of the chosen source folder (or the uncloaked originals), and
-writes a drop-in method folder with the same filename layout. A
-`_edit_run.json` manifest is saved alongside each output folder
-recording the provider, params, prompt, seed, source, and CSV used.
-
-The default provider, `local_stub`, is fully deterministic and offline:
-given the same `(image, prompt, seed, filename)` it produces
-byte-identical output on every run, on every machine. This guarantees
-the LLM-alteration column of the eval report is reproducible even
-without API access. To plug a real LLM-backed editor in, implement the
-`EditProvider` protocol in
-[src/facial_cloaking/edits.py](src/facial_cloaking/edits.py) and add it
-to the `_PROVIDERS` registry.
-
-Recommended workflow:
+A live UI over the same pipeline — useful for iterating on method × purification
+combinations without re-loading CLIP each run.
 
 ```bash
-# Edit the uncloaked baseline (what the LLM does to a clean portrait).
-python scripts/run_edits.py \
-    --source uncloaked \
-    --out outputs/edits/uncloaked \
-    --csv splits/editing_eval.csv \
-    --seed 0
-
-# Edit each cloaking method's outputs with the SAME provider/prompt/seed.
-python scripts/run_edits.py \
-    --source outputs/methods/noise \
-    --out outputs/edits/noise \
-    --csv splits/editing_eval.csv \
-    --seed 0
-
-python scripts/run_edits.py \
-    --source outputs/methods/blur \
-    --out outputs/edits/blur \
-    --csv splits/editing_eval.csv \
-    --seed 0
-
-# Score the edited folders with the same gallery + metrics.
-python scripts/evaluate.py \
-    --methods uncloaked_edited=outputs/edits/uncloaked \
-              noise_edited=outputs/edits/noise \
-              blur_edited=outputs/edits/blur \
-    --csv splits/editing_eval.csv \
-    --output outputs/edit_eval_report.json
+streamlit run scripts/eval_dashboard.py
+# Opens http://localhost:8501
 ```
 
-A cloak is considered to resist editing if its `*_edited` row has a
-**lower** rank-1 and lower mean-true-cosine than `uncloaked_edited`
-under the same provider/prompt/seed.
+Headless launch (no auto browser, no usage stats):
 
-### Output layout
+```bash
+streamlit run scripts/eval_dashboard.py \
+    --server.headless true \
+    --server.port 8501 \
+    --browser.gatherUsageStats false
+```
 
-```
-outputs/
-  attractors.pt                # gallery (centroids + null attractor)
-  methods/<name>/*.jpg         # cloaked images per method
-  edits/<name>/*.jpg           # LLM-altered images per method
-  edits/<name>/_edit_run.json  # provider/prompt/seed manifest
-  eval_report.json             # scripts/evaluate.py output
-  robustness_report.json       # scripts/robustness_test.py output
-  edit_eval_report.json        # eval over edited methods
-```
+Requirements: a successful `compute_attractors.py` run (the dashboard reads
+`outputs/attractors.pt`) and at least one method folder under
+`outputs/methods/` (or pick `uncloaked` only).
+
+The dashboard has three tabs:
+
+- **Score** — multi-select methods + purifications, click *Run* to populate a
+  live table of `rank1 / mean_true_cos / qa_gap / null_gap / ssim / psnr` and
+  a robustness sub-table; *Save JSON* writes the same payload as
+  `scripts/evaluate.py`.
+- **Drill-down** — pick a method and identity; see per-image cosine
+  similarities and side-by-side thumbnails of the original, the cloaked
+  candidate, and (if a purification is enabled) the purified candidate.
+- **Compare** — pick two methods previously scored and view an A/B/Δ table
+  for both core metrics and the per-purification rank-1.
+
+CLIP and the gallery are cached across reruns (`@st.cache_resource`), so
+toggling sidebar widgets does not re-load the model. CPU CLIP encodes ~200
+images per method in roughly 1–3 minutes; GPU runs are seconds.
