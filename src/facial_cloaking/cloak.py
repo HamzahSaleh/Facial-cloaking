@@ -6,12 +6,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from .dct_utils import (
-    band_energy_stats,
-    band_mask,
-    blockwise_dct2d,
-    profile_band_ranges,
-)
+from .dct_utils import *
 
 
 # CLIP ViT-B/32 normalization constants (open_clip / OpenAI CLIP).
@@ -265,26 +260,33 @@ def _optimize(
     forward_fn,         # (x, params) -> x_cloak in roughly [0, 1]
     init_params: dict,  # learnable parameters (will be cloned + grad-enabled)
     constrain_params,   # callable(params) -> None, applied after each opt step (no-grad)
-    use_freq_loss: bool,
     config: CloakConfig,
 ) -> tuple[torch.Tensor, dict]:
     """Run the per-image cloaking optimization. Returns (x_cloak, metrics)."""
     device = x.device
     dtype = x.dtype
 
-    if use_freq_loss:
-        masks = build_frequency_masks(config, device=device, dtype=dtype)
-        mid_mask = masks.mid
-    else:
-        mid_mask = None
+
+    masks = build_frequency_masks(config, device=device, dtype=dtype)
+    mid_mask = masks.mid
+
 
     # Freeze CLIP so backward only computes activation gradients (to reach our
     # learnable params) and skips per-layer weight-grad computation.
     for p in model.parameters():
         p.requires_grad_(False)
 
-    params = {k: v.clone().detach().requires_grad_(True) for k, v in init_params.items()}
-    optimizer = torch.optim.Adam(list(params.values()), lr=config.lr)
+    params = {} # Pass through non-learnable metadat
+    for k, v in init_params.items():
+        if k.startswith("_") or not isinstance(v, torch.Tensor):
+            params[k] = v
+        else :
+            params[k] = v.clone().detach().requires_grad_(True)
+    
+    optimizer = torch.optim.Adam( #only optimize for learnable paramters
+        [v for k, v in params.items() if isinstance(v, torch.Tensor) and v.requires_grad],
+        lr=config.lr
+    )
 
     history = {"l_total": [], "l_embed": [], "l_quality": [], "l_freq": []}
 
@@ -300,15 +302,13 @@ def _optimize(
 
         l_embed = _l_embed(e_cloak, e_id, e_null)
         l_quality = _l_quality(x_cloak, x)
-        if use_freq_loss:
-            l_freq = _l_freq(x_cloak, x, mid_mask, config.block_size)
-        else:
-            l_freq = torch.zeros((), device=device, dtype=dtype)
+        l_freq = _l_freq(x_cloak, x, mid_mask, config.block_size)
+
 
         loss = (
             config.lambda_embed * l_embed
             + config.lambda_quality * l_quality
-            + (config.lambda_freq * l_freq if use_freq_loss else 0.0)
+            + config.lambda_freq * l_freq
         )
         loss.backward()
         optimizer.step()
@@ -319,7 +319,7 @@ def _optimize(
         history["l_total"].append(float(loss.item()))
         history["l_embed"].append(float(l_embed.item()))
         history["l_quality"].append(float(l_quality.item()))
-        history["l_freq"].append(float(l_freq.item()) if use_freq_loss else 0.0)
+        history["l_freq"].append(float(l_freq.item()))
 
     with torch.no_grad():
         x_cloak_raw = forward_fn(x, params)
@@ -341,27 +341,38 @@ def _optimize(
 
 
 # ---------------------------------------------------------------------------
-# Non-linear channel mixing forward + cloaker
+#  forward function + cloaker
 # ---------------------------------------------------------------------------
 
-def _forward_nlcm(x: torch.Tensor, params: dict) -> torch.Tensor:
-    """x_cloak = softplus(W @ x + delta + bias) - bias.
+def _forward(x: torch.Tensor, params: dict) -> torch.Tensor:
+    """Combined forward: DCT-domain delta → freq mask → IDCT → NL channel mix.
 
-    With W = I and delta = 0, the bias term makes softplus near-linear over [0, 1]
-    so the identity initialization reproduces x to within ~2%. The non-linearity
-    is what blocks the additive `x + delta` inverse: there is no closed-form
-    way to recover delta given W and the cloaked output.
+    delta_dct is masked to mid-frequency bands, converted to pixel space via
+    IDCT, then combined with x through non-linear channel mixing:
+        x_cloak = softplus(W @ x + delta_pixel + bias) - bias
+
+    The DCT-domain parameterization ensures perturbation energy is structurally
+    entangled with identity-bearing frequencies. The softplus non-linearity
+    blocks additive inversion.
     """
-    C, H, Wd = x.shape
+    delta_dct = params["delta_dct"]
+    mid_mask = params["_mid_mask"]
+    geometry = params["_geometry"]
     W = params["W"]
-    delta = params["delta"]
+    block_size = params["_block_size"]
+
+    masked_dct = mid_mask * delta_dct
+    delta_pixel = blockwise_idct2d(masked_dct, geometry, block_size=block_size)
+    delta_pixel = delta_pixel.squeeze(0)  # [B,C,H,W] -> [C,H,W]
+
+    C, H, Wd = x.shape
     x_flat = x.reshape(C, H * Wd)
     mixed = (W @ x_flat).reshape(C, H, Wd)
-    pre = mixed + delta + _NLCM_SOFTPLUS_BIAS
+    pre = mixed + delta_pixel + _NLCM_SOFTPLUS_BIAS
     return F.softplus(pre) - _NLCM_SOFTPLUS_BIAS
+    
 
-
-def cloak_image_nlcm(
+def cloak_image(
     img: Image.Image,
     e_identity: torch.Tensor,
     e_null: torch.Tensor,
@@ -371,17 +382,12 @@ def cloak_image_nlcm(
     device: torch.device | str | None = None,
     w_max_frob: float = 0.1,
 ) -> tuple[Image.Image, dict]:
-    """Non-linear channel mixing cloak. Loss = lambda_embed * L_embed + lambda_quality * L_quality.
-
+    """
     Learnable parameters: per-pixel delta in R^{3xHxW} (init 0) and a 3x3 channel
     mixing matrix W (init I). Constraints applied after each step:
       * ||delta||_inf <= epsilon
       * ||W - I||_F <= w_max_frob
     Final image is also clamped to [0, 1].
-
-    L_freq is intentionally NOT included in this method so the ablation
-    isolates the non-linear-mixing parameterization from the frequency
-    regularizer used by the freq-only and combined variants.
     """
     config = config or CloakConfig()
     device = torch.device(device) if device is not None else next(model.parameters()).device
@@ -389,21 +395,28 @@ def cloak_image_nlcm(
     e_id = e_identity.to(device).detach()
     e_n = e_null.to(device).detach()
 
+    x_4d = x.unsqueeze(0)
+    coeff, geometry = blockwise_dct2d(x_4d, block_size=config.block_size)
+
+    masks = build_frequency_masks(config, device=device, dtype=x.dtype)
+
     init_params = {
-        "delta": torch.zeros_like(x),
+        "delta_dct": torch.zeros_like(coeff),
         "W": torch.eye(3, device=device, dtype=x.dtype),
+        "_mid_mask": masks.mid,
+        "_geometry": geometry,
+        "_block_size": config.block_size
     }
 
     def constrain(p):
-        p["delta"].clamp_(-config.epsilon, config.epsilon)
+        p["delta_dct"].clamp_(-config.epsilon, config.epsilon)
         p["W"].copy_(_project_w(p["W"], max_frob=w_max_frob))
 
     x_cloak, metrics = _optimize(
         x, e_id, e_n, model,
-        forward_fn=_forward_nlcm,
+        forward_fn=_forward,
         init_params=init_params,
         constrain_params=constrain,
-        use_freq_loss=False,
         config=config,
     )
     metrics["method"] = "nlcm"

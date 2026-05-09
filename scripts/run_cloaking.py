@@ -10,12 +10,10 @@ expect:
 exactly so ``facial_cloaking.eval_pipeline.resolve_method_rows`` can pair
 each cloaked image with its original.
 
-Currently only ``--method nlcm`` (non-linear channel mixing) is wired up;
-the embed-only and freq-only variants will be added by other contributors.
 
 Examples:
-    python scripts/run_cloaking.py --method nlcm --epsilon 8 --steps 300
-    python scripts/run_cloaking.py --method nlcm --steps 50 --limit 10  # smoke test
+    python scripts/run_cloaking.py --method cloak --epsilon 8 --steps 300
+    python scripts/run_cloaking.py --method cloak --steps 50 --limit 10  # smoke test
 """
 from __future__ import annotations
 
@@ -31,7 +29,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from facial_cloaking.cloak import CloakConfig, cloak_image_nlcm
+from facial_cloaking.cloak import CloakConfig, cloak_image
 from facial_cloaking.data import load_image
 from facial_cloaking.embed import load_clip_model
 from facial_cloaking.eval_pipeline import Gallery
@@ -39,7 +37,7 @@ from facial_cloaking.paths import PROJECT_ROOT
 
 
 _METHODS = {
-    "nlcm": cloak_image_nlcm,
+    "cloak": cloak_image,
 }
 
 
@@ -49,7 +47,7 @@ def main() -> None:
         "--method",
         choices=sorted(_METHODS.keys()),
         required=True,
-        help="cloaking method to run (only 'nlcm' is implemented today)",
+        help="cloaking method to run ('cloak') for full facial cloaking",
     )
     parser.add_argument("--csv", default=str(PROJECT_ROOT / "splits" / "protected.csv"))
     parser.add_argument(
