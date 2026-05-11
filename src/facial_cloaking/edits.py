@@ -33,7 +33,7 @@ import json
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, ClassVar
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -142,8 +142,82 @@ def get_provider(name: str) -> EditProvider:
     )
 
 
+@dataclass
+class IPAdapterEditor:
+    """Image editor using IP-Adapter (OpenCLIP-ViT-H/14 image conditioning).
+
+    Generation is conditioned on the CLIP image embedding of the input.
+    With ip_adapter_scale=1.0, text is ignored — output is driven entirely
+    by the CLIP representation of the source image.
+
+    Requires: pip install diffusers transformers accelerate
+    First run downloads ~5 GB of weights to ~/.cache/huggingface.
+    """
+    name: str = "ipadapter"
+    ip_adapter_scale: float = 1.0
+    num_inference_steps: int = 30
+    guidance_scale: float = 7.5
+
+    # Class-level pipeline cache — shared across instances, not a dataclass field
+    _pipe: ClassVar = None
+
+    @property
+    def params(self) -> dict:
+        return {
+            "ip_adapter_scale": self.ip_adapter_scale,
+            "num_inference_steps": self.num_inference_steps,
+            "guidance_scale": self.guidance_scale,
+        }
+
+    def _get_pipeline(self):
+        if IPAdapterEditor._pipe is None:
+            import torch
+            from diffusers import StableDiffusionPipeline
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            dtype  = torch.float16 if device == "cuda" else torch.float32
+
+            pipe = StableDiffusionPipeline.from_pretrained(
+                "runwayml/stable-diffusion-v1-5",
+                torch_dtype=dtype,
+                safety_checker=None,
+                requires_safety_checker=False,
+            ).to(device)
+
+            pipe.load_ip_adapter(
+                "h94/IP-Adapter",
+                subfolder="models",
+                weight_name="ip-adapter_sd15.bin",
+            )
+            pipe.set_ip_adapter_scale(self.ip_adapter_scale)
+
+            if device == "cpu":
+                pipe.enable_attention_slicing()
+
+            IPAdapterEditor._pipe = pipe
+
+        return IPAdapterEditor._pipe
+
+    def apply(self, image: Image.Image, *, prompt: str, seed: int) -> Image.Image:
+        import torch
+
+        pipe = self._get_pipeline()
+        generator = torch.Generator(device=pipe.device.type).manual_seed(seed)
+
+        result = pipe(
+            prompt=prompt,
+            ip_adapter_image=image.convert("RGB"),
+            num_inference_steps=self.num_inference_steps,
+            guidance_scale=self.guidance_scale,
+            generator=generator,
+            height=256,
+            width=256,
+        )
+        return result.images[0]
+
 _PROVIDERS: dict[str, EditProvider] = {
     "local_stub": LocalStubEditor(),
+    "ipadapter": IPAdapterEditor(),
 }
 
 
