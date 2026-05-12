@@ -10,36 +10,6 @@ Metrics:
   tnr      – True Negative Rate  (diff-person pairs answered "No")
   accuracy – (tpr + tnr) / 2
 
-A well-cloaked image should have LOW tpr (GPT-4o cannot confirm the true
-identity) and high tnr (it correctly rejects distractors).
-
-Requires:
-    pip install openai
-    export OPENAI_API_KEY=sk-...
-
-Examples:
-    # Smoke test – 5 queries, uncloaked baseline
-    python scripts/gpt4o_qa_eval.py --method uncloaked --limit 5 --dry-run
-
-    # Evaluate the cloak
-    python scripts/gpt4o_qa_eval.py \\
-        --method cloak=outputs/methods/cloak \\
-        --csv splits/protected.csv \\
-        --output outputs/gpt4o_cloak.json
-
-    # Evaluate multiple methods back-to-back
-    python scripts/gpt4o_qa_eval.py \\
-        --method uncloaked \\
-        --method cloak=outputs/methods/cloak \\
-        --method noise=outputs/methods/noise \\
-        --output outputs/gpt4o_core.json
-
-    # Evaluate ipadapter edited images
-    python scripts/gpt4o_qa_eval.py \\
-        --method uncloaked_edited=outputs/edits/ipadapter/uncloaked \\
-        --method cloak_edited=outputs/edits/ipadapter/cloak \\
-        --csv splits/editing_eval.csv \\
-        --output outputs/gpt4o_ipadapter.json
 """
 from __future__ import annotations
 
