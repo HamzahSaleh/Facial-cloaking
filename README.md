@@ -150,3 +150,6 @@ The dashboard has three tabs:
 CLIP and the gallery are cached across reruns (`@st.cache_resource`), so
 toggling sidebar widgets does not re-load the model. CPU CLIP encodes ~200
 images per method in roughly 1–3 minutes; GPU runs are seconds.
+
+## AI Assistance
+This project was developed with assistance from Claude (Anthropic). Claude was used throughout development for tasks including code review, debugging, architecture discussion, and documentation. All final design decisions, implementation, and evaluation were performed by the project authors.
