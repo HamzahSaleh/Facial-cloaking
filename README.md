@@ -27,7 +27,7 @@ The full loss, optimization schedule, and evaluation surfaces are described in
 ## Repository layout
 
 ```
-data/                        # LFW deep-funneled dataset (not committed)
+data/                        # LFW deep-funneled dataset (not committed)*
 src/facial_cloaking/         # importable package (paths, data, embed, ...)
 scripts/                     # standalone scripts (env check, split builder, ...)
 splits/                      # versioned CSV partition manifests
@@ -35,7 +35,7 @@ outputs/                     # generated artifacts (attractors, cloaked images, 
 plan.md                      # design doc for the cloaking algorithm
 environment.md               # environment / CUDA setup notes
 ```
-
+*[LFW Deep-Funneled download via kaggle](https://www.kaggle.com/datasets/jessicali9530/lfw-dataset)
 ## Setup
 
 ```bash
